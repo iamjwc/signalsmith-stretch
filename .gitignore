@@ -1,2 +1,4 @@
 .DS_Store
 out/
+web/node_modules/
+web/dist/

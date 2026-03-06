@@ -1,65 +1,65 @@
 # Signalsmith Stretch Web
 
-This is an official release of the Signalsmith Stretch library for Web Audio, using WASM/AudioWorklet.  It includes both plain `.js` (UMD), and ES6 `.mjs` versions.
+Signalsmith Stretch ships as a WASM AudioWorklet module with TypeScript bindings. The published package exposes both CommonJS (`SignalsmithStretch.js`) and ESM (`SignalsmithStretch.mjs`) bundles plus type declarations (`SignalsmithStretch.d.ts`).
 
-## How to use it
+## Usage
 
-Call `SignalsmithStretch(audioContext, ?channelOptions)` from the main thread.  This returns a Promise which resolves to an `AudioNode`, with extra methods attached to it.  The optional [`channelOptions` object](https://developer.mozilla.org/en-US/docs/Web/API/AudioWorkletNode/AudioWorkletNode#options) can specify the number of inputs/outputs and channels.
+```ts
+import SignalsmithStretch, {
+	StretchNode,
+	StretchSchedule,
+	StretchConfigureOptions
+} from 'signalsmith-stretch';
 
-It can operate either on live input (if connected to input audio), or on sample buffers you load into it (which can be added/removed dynamically, for streaming).  Either way, you need to call `.start()` (or equivalently `.schedule({active: true})`) for it to start processing audio.
+const context = new AudioContext();
+const stretch: StretchNode = await SignalsmithStretch(context, {
+	outputChannelCount: [2]
+});
+stretch.connect(context.destination);
 
-### `stretch.inputTime`
+await stretch.setUpdateInterval(0.05, (timeSeconds) => console.log('input time', timeSeconds));
+await stretch.start();
+```
 
-The current input time, within the sample buffer.  You can change how often this is updated, with an optional callback function, using `stretch.setUpdateInterval(seconds, ?callback)`.
+### Scheduling
 
-### `stretch.schedule({...})`
+`stretch.schedule(schedule)` queues automation describing input position, playback rate and pitch. Important fields on `StretchSchedule`:
 
-This adds a scheduled change, removing any scheduled changes occuring after this one.  The object properties are:
+- `output`: AudioContext time for the change (seconds)
+- `input`: playback position inside the buffered material (seconds)
+- `rate`: playback speed multiplier (1 == real time)
+- `semitones`, `tonalityHz`, `formantSemitones`, `formantCompensation`, `formantBaseHz`: pitch/formant controls
+- `loopStart` / `loopEnd`: optional loop region
+- `active`: toggle processing on/off
 
-* `output` (seconds): audio context time for this change.  The node compensates for its own latency, but this means you might want to schedule some things ahead of time, otherwise you'll have a softer transition as it catches up.
-* `active` (bool): processing audio
-* `input` (seconds): position in input buffer
-* `rate` (number): playback rate, e.g. 0.5 == half speed
-* `semitones` (number): pitch shift
-* `tonalityHz` (number): tonality limit (default 8000)
-* `formantSemitones` (number) / `formantCompensation` (bool): formant shift/compensation
-* `formantBaseHz` (number): rough fundamental used for formant analysis (e.g. 100 for low voice, 400 for high voice), or `0` to attempt pitch-tracking
-* `loopStart` (seconds) / `loopEnd` (seconds): sets a section of the input buffer to auto-loop.  Disabled if both are set to the same value.
+`stretch.start()`/`stretch.stop()` wrap `schedule` with an AudioBufferSourceNode-like signature: `start(when?, offset?, duration?, rate?, semitones?)`.
 
-If the node is processing live input (not a buffer) then `input`/`rate`/`loopStart`/`loopEnd` are ignored.
+### Feeding audio buffers
 
-### `stretch.start(?when)` / `stretch.stop(?when)`
+`stretch.addBuffers(buffers, transferList?)` appends audio data. `buffers` is an array of `Float32Array`s (one per channel). Pass the underlying `ArrayBuffer`s via the optional transfer list to avoid copying.
 
-Starts/stops playback or processing, immediately or at some future time.  These are convenience methods which call `.schedule(...)` under the hood.
+`stretch.dropBuffers()` clears all buffered audio. Providing a number drops buffers that finish before the given time and resolves with `{start, end}` describing the remaining buffered range.
 
-`.start()` actually has more parameters, presenting a similar interface to [AudioBufferSourceNode](https://developer.mozilla.org/en-US/docs/Web/API/AudioBufferSourceNode/start).
+### Monitoring + latency
 
-### `stretch.addBuffers([...])`
+- `stretch.inputTime` reports the last known playback position. Call `stretch.setUpdateInterval(seconds, callback)` to control how often the node posts updates back to the main thread.
+- `stretch.latency()` resolves to the sum of input/output latency in seconds. For click-free automation, schedule changes slightly ahead of real time by that amount.
 
-This adds buffers to the end of the current input sample buffers.  Buffers should be typed arrays of equal length, one per channel.
+### Reconfiguration
 
-It can be called multiple times, and the new buffers are inserted immediately after the existing ones, which lets you start playback before the entire audio is loaded.  It returns a Promise for the new sample buffer end time, in seconds.
+`stretch.configure(config)` accepts either presets (`preset: 'default' | 'cheaper'`) or explicit STFT sizes via `blockMs`, `intervalMs`, and `splitComputation`.
 
-### `stretch.dropBuffers()`
+## TypeScript
 
-This drops all input buffers, and resets the input buffer end time to 0.
+The package exports the `StretchNode`, `StretchSchedule`, `StretchConfigureOptions`, `StretchBufferRange`, and `StretchBufferBlock` types alongside the default factory. Everything is fully typed for both browser and bundler workflows.
 
-### `stretch.dropBuffers(toSeconds)`
+## Building locally
 
-This drops all input buffers before the given time, but doesn't change the end time.  It returns a Promise for an object with the current input buffer extent: `{start: ..., end: ...}`.
+```
+cd web
+npm install
+npm run build
+make release/SignalsmithStretch.mjs
+```
 
-This can be useful when processing streams or very long audio files, letting the Stretch node release old buffers once that section of the input will no longer be played back.
-
-### `stretch.latency()`
-
-Returns the latency when used in "live input" mode, in seconds.  This is also how far ahead you might want to schedule things (`output` in `.schedule()`) to give the node enough time to fully compensate for its own latency.
-
-### `stretch.configure({...})`
-
-Optionally reconfigure, with the following fields:
-
-* `blockMs`: block length in ms (e.g. 120ms)
-* `intervalMs`: interval (default `blockMs/4`)
-* `splitComputation`: spread computation more evenly across time (default `false`)
-
-If you set `blockMs`  to `0` or `null`, it will check for a `preset` field (with the values `"default"`/`"cheaper"`).
+`npm run build` transpiles the TypeScript bindings into `web/dist/`; the `Makefile` concatenates them with the generated WASM glue and produces both `.js` and `.mjs` builds in `web/release/`.
